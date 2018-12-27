@@ -1,0 +1,17 @@
+---
+title: "Usenet Analysis"
+author: "Richard G. Gardiner"
+date: "12/26/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This example comes from the final chapter of the Text Mining with R book.  Here we will use the common Usenet bulletin board dataset to run a "start to finish" analysis.  This dataset has 20,000 messages sent ot 20 Usenet boards in 1993.  The data is available at [http://qwone.com/~jason/20Newsgroups/](http://qwone.com/~jason/20Newsgroups/) (use the `20news-bydate.tar.gz`)
+
+## loading and pre-processing
+
+
+
