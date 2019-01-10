@@ -93,14 +93,281 @@ Now we can use the `unnest_tokens()` to split the dataset into tokens, while rmo
 ```{r}
 library(tidytext)
 
-unnest_words <- cleaned_text %>%
+usenet_words <- cleaned_text %>%
   unnest_tokens(word, text) %>%
   filter(str_detect(word, "[a-z']$"),
-         word %in% stop_words$word)
+         !word %in% stop_words$word)
 ```
 
 Almost all datasets will require some cleaning and processing.  This happens through a lot of trial and error.  Though, as we can see, most of this can be done using the tidy tools like dplyr and tidyr.
 
+
+## Words in newsgroups
+
+Now that we have removed the headers, signatures, and formatting, we can start exploring common words.  This can be a general one and then one within particular newsgroups.
+
+
+```{r}
+usenet_words %>%
+  count(word, sort = TRUE)
+```
+
+
+```{r}
+words_by_newsgroup <- usenet_words %>%
+  count(newsgroup, word, sort = TRUE) %>%
+  ungroup()
+```
+
+
+### Finding tf-idf within newsgroups
+
+Now lets see what terms are distinct to each newsgroup using the tf-idf metrc
+
+```{r}
+tf_idf <- words_by_newsgroup %>%
+  bind_tf_idf(word, newsgroup, n) %>%
+  arrange(desc(tf_idf))
+
+tf_idf
+```
+
+
+Now let's look at some of the most common words with newsgroups that have the `sci` boards.
+
+```{r}
+tf_idf %>%
+  filter(str_detect(newsgroup, "^sci\\.")) %>%
+  group_by(newsgroup) %>%
+  top_n(12, tf_idf) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, tf_idf)) %>%
+  ggplot(aes(word, tf_idf, fill = newsgroup)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ newsgroup, scales = "free") +
+  ylab("tf-idf") +
+  coord_flip()
+```
+
+We see that even within the science boards we see distinct words for each one.  The space is clearly about NASA and launches.  
+
+What newsgroups tended to be similar to each otehr in text context?  We could discover this by finding the pairwise correlation of word frequencies within each newsgroup, using the `pairwise_cor()` fucntion from teh widyr package.
+
+```{r}
+library(widyr)
+
+newsgroup_cors <- words_by_newsgroup %>%
+  pairwise_cor(newsgroup, word, n, sort = TRUE)
+
+newsgroup_cors
+```
+
+We can now then filter for stronger correlations among the newsgroups, and visualize them in a network.
+
+```{r}
+library(ggraph)
+library(igraph)
+set.seed(2019)
+
+
+newsgroup_cors %>%
+  filter(correlation > 0.4) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(alpha = correlation, width = correlation)) +
+  geom_node_point(size = 6, color = "lightblue") +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  theme_void()
+```
+
+It appears that there were 4 main clusters for newsgroups: computers/electronics, politics/religion, motor vehicles, and sports.  This makes sense in terms of what words and topic we'd expect these newsgroups to have in common.
+
+
+### Topic modeling
+
+Could we test the LDA algorithm to how well it can piece back together the science-related newsgroups?  First, we need to put the data into a DTM using `cast_dtm()` then fit the `LDA()` function from the topicmodels package.
+
+```{r}
+# including only words that occur 50+ times
+words_sci_newsgroup <- usenet_words %>%
+  filter(str_detect(newsgroup, "^sci")) %>%
+  group_by(word) %>%
+  mutate(word_total = n()) %>%
+  ungroup() %>%
+  filter(word_total > 50)
+
+# convert into a dtm with document names such as sci.crypt_14147
+sci_dtm <- words_sci_newsgroup %>%
+  unite(document, newsgroup, id) %>%
+  count(document, word) %>%
+  cast_dtm(document, word, n)
+
+# running the LDA
+library(topicmodels)
+sci_lda <- LDA(sci_dtm, k = 4, control = list(seed = 2016))
+```
+
+What four topics did this model extract and did they match the 4 newsgroups?  One wya to look at this is to vsualize each topic based on the most frequent terms within it.
+
+```{r}
+sci_lda %>%
+  tidy() %>%
+  group_by(topic) %>%
+  top_n(8, beta) %>%
+  ungroup() %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()
+```
+
+Topic 4 is clearly showing the space newsgroup, topic 1 looks like it is the one about crypography, and the other ones, I am not certain about.  Just like the earlier chapters we can confirm how we did with each document from each newsgroup by seeing which one have a higher gamma for each topic.
+
+```{r}
+sci_lda %>%
+  tidy(matrix = "gamma") %>%
+  separate(document, c("newsgroup", "id"), sep = "_") %>%
+  mutate(newsgroup= reorder(newsgroup, gamma * topic)) %>%
+  ggplot(aes(factor(topic), gamma)) +
+  geom_boxplot() +
+  facet_wrap(~ newsgroup) +
+  labs(x = "Topic",
+       y = "# of messages where this has the highest % topic")
+```
+
+Given how much drift can occur in message boards about science (my guess is that if we divided them by the broader categories, this would do better).  Though the model does pretty good except for maybe the electronics topic.  
+
+
+
+## Sentiment Analysis
+
+We can use sentiment analysis techniques to examine how often positive and negative words occurred in these Usenet posts.  Which newsgroups were the most positive/negative overall?
+
+```{r}
+newsgroup_sentiments <- words_by_newsgroup %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(newsgroup) %>%
+  summarise(score = sum(score * n)/sum(n))
+
+newsgroup_sentiments %>%
+  mutate(newsgroup = reorder(newsgroup, score)) %>%
+  ggplot(aes(newsgroup, score, fill = score > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  ylab("Average sentiment score")
+```
+
+
+Not too surprisingly, politics is the most negative whereas sports and "forsale" are the most positive.  Note: I really like the coloring option here.
+
+
+### Sentiment Analysis by Word
+
+We probably should see as to why the different newsgroups ended up being more positive or negative than others.  To do this, we simply exam the total positive and total negative contributions of each word.
+
+```{r}
+sentiment_contribution <- usenet_words %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(word) %>%
+  summarise(occurences = n(),
+            contribution = sum(score))
+
+sentiment_contribution %>%
+  top_n(25, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip()
+```
+
+These look generally reasonable as indicators of each message's sentiment, but there are potential problems.  "True" could just as easily be a part of "not true" or a similar expression.  "God" and "Jesus" could easily be used both positively and negatively.  
+
+So now we might want to look at which words contributed the most *within each newsgroup*.  We can calculate each word's contribution to each newsgroup's sentiemtn score, and visualize the strongest contribution from a selection of the groups.
+
+```{r}
+sentiment_contribution_by_newsgroup <- words_by_newsgroup %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  mutate(contribution = score * n / sum(n))
+sentiment_contribution_by_newsgroup
+
+sentiment_contribution_by_newsgroup %>%
+  group_by(newsgroup) %>%
+  top_n(5, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ newsgroup, scales = "free") +
+  coord_flip()
+```
+
+This does help in our hypothesis about the "misc.forsale" newsgroup: most sentiment was driven by positive adjuectives such as "excellent" and "perfect".  Additionally, the athesim looks like it is being seen as more positive than it should because the word "god" is treated positively when it likely is being used in a negative context.  Also, the word gun is being treated negatively in the "guns" groups, but this is likely meant as positive.
+
+
+### Sentiment Analysis by message
+
+We can also try finding the most positive and negative individual messages, by grouping and summarizing by `id` rather than newsgroup.
+
+```{r}
+sentiment_messages <- usenet_words %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(newsgroup, id) %>%
+  summarize(sentiment = mean(score),
+            word = n()) %>%
+  ungroup() %>%
+  filter(word >= 5)
+```
+
+
+What were the most positive messages?
+
+```{r}
+sentiment_messages %>%
+  arrange(desc(sentiment))
+```
+
+
+### N-gram analysis
+
+As was done with the Jane Austen novels, we may want to look at the Usenet dataset that may have negation ngrams ("don't like" instead of "dont", "like").  We start by finding and counting all the bigrams in the Usenet posts.
+
+```{r}
+usenet_bigrams <- cleaned_text %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+usenet_bigram_counts <- usenet_bigrams %>%
+  count(newsgroup, bigram, sort = TRUE) %>%
+  ungroup() %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+```
+
+
+We now define a list of words (six in this instance) that we expect are used in negation, such as "no", "not", and "without", and visualize the sentiment-associated words that most often followed them.  This shows the words that most often contributed in the "wrong" direction.
+
+
+```{r}
+negate_words <- c("not", "without", "no", "can't", "don't", "won't")
+
+usenet_bigram_counts %>%
+  filter(word1 %in% negate_words) %>%
+  count(word1, word2, wt = n, sort = TRUE) %>%
+  inner_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+  mutate(contribution = score * nn) %>%
+  group_by(word1) %>%
+  top_n(10, abs(contribution)) %>%
+  ungroup() %>%
+  mutate(word2 = reorder(paste(word2, word1, sep = "__"), contribution)) %>%
+  ggplot(aes(word2, contribution, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ word1, scales = "free", nrow = 3) +
+  scale_x_discrete(labels = function(x) gsub("__.+$", "", x)) +
+  xlab("Words preceded by a negation") +
+  ylab("Sentiment score * # of occurrences") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+```
+
+It looks like the largest sources of misidentifying a word as positive come from "don't want/like/care", and the largest source of incorrectly classified negative sentiment is "no problem".
 
 
 
